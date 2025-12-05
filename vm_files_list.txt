@@ -1,0 +1,94 @@
+# Virtual Memory Management Related Files
+
+## Core VASpace Files
+./src/nvidia/src/kernel/mem_mgr/vaspace.c
+./src/nvidia/inc/kernel/mem_mgr/vaspace.h
+./src/nvidia/src/kernel/gpu/mem_mgr/vaspace_api.c
+./src/nvidia/inc/kernel/gpu/mem_mgr/vaspace_api.h
+
+## GPU VASpace Files
+./src/nvidia/src/kernel/mem_mgr/gpu_vaspace.c
+./src/nvidia/inc/kernel/mem_mgr/gpu_vaspace.h
+
+## IO VASpace Files
+./src/nvidia/src/kernel/mem_mgr/io_vaspace.c
+./src/nvidia/inc/kernel/mem_mgr/io_vaspace.h
+
+## Fabric VASpace Files
+./src/nvidia/src/kernel/mem_mgr/fabric_vaspace.c
+./src/nvidia/inc/kernel/mem_mgr/fabric_vaspace.h
+
+## Virtual Memory Allocator Files
+./src/nvidia/src/kernel/gpu/mem_mgr/virt_mem_allocator.c
+./src/nvidia/inc/kernel/gpu/mem_mgr/virt_mem_allocator.h
+./src/nvidia/inc/kernel/gpu/mem_mgr/virt_mem_allocator_common.h
+./src/nvidia/src/kernel/gpu/mem_mgr/virt_mem_allocator_vgpu.c
+./src/nvidia/src/kernel/gpu/mem_mgr/arch/maxwell/virt_mem_allocator_gm107.c
+./src/nvidia/src/kernel/gpu/mem_mgr/arch/hopper/virt_mem_allocator_gh100.c
+
+## Virtual Memory Manager Files
+./src/nvidia/src/kernel/mem_mgr/virt_mem_mgr.c
+./src/nvidia/inc/kernel/mem_mgr/virt_mem_mgr.h
+./src/nvidia/src/kernel/mem_mgr/virt_mem_range.c
+./src/nvidia/inc/kernel/mem_mgr/virt_mem_range.h
+./src/nvidia/src/kernel/mem_mgr/virtual_mem.c
+./src/nvidia/inc/kernel/mem_mgr/virtual_mem.h
+
+## DMA Files
+./src/nvidia/src/kernel/gpu/mem_mgr/dma.c
+
+## MMU Library Files
+./src/nvidia/src/libraries/mmu/mmu_walk.c
+./src/nvidia/src/libraries/mmu/mmu_walk_map.c
+./src/nvidia/src/libraries/mmu/mmu_walk_unmap.c
+./src/nvidia/src/libraries/mmu/mmu_walk_fill.c
+./src/nvidia/src/libraries/mmu/mmu_walk_info.c
+./src/nvidia/src/libraries/mmu/mmu_walk_reserve.c
+./src/nvidia/src/libraries/mmu/mmu_walk_migrate.c
+./src/nvidia/src/libraries/mmu/mmu_walk_commit.c
+./src/nvidia/src/libraries/mmu/mmu_walk_sparse.c
+./src/nvidia/src/libraries/mmu/mmu_fmt.c
+./src/nvidia/src/libraries/mmu/mmu_walk_private.h
+./src/nvidia/inc/libraries/mmu/mmu_walk.h
+./src/nvidia/inc/libraries/mmu/mmu_fmt.h
+
+## GMMU Files
+./src/nvidia/src/libraries/mmu/gmmu_fmt.c
+./src/nvidia/inc/libraries/mmu/gmmu_fmt.h
+./src/nvidia/src/kernel/gpu/mmu/gmmu_walk.c
+./src/nvidia/src/kernel/gpu/mmu/gmmu_trace.c
+./src/nvidia/inc/kernel/gpu/mmu/kern_gmmu.h
+
+## MMU Kernel Files
+./src/nvidia/src/kernel/gpu/mmu/mmu_fault_buffer.c
+./src/nvidia/inc/kernel/gpu/mmu/mmu_fault_buffer.h
+./src/nvidia/src/kernel/gpu/mmu/mmu_fault_buffer_ctrl.c
+./src/nvidia/src/kernel/gpu/mmu/mmu_trace.c
+./src/nvidia/inc/kernel/gpu/mmu/mmu_trace.h
+
+## Generated NVOC Files (Virtual Memory Related)
+./src/nvidia/generated/g_vaspace_nvoc.c
+./src/nvidia/generated/g_vaspace_nvoc.h
+./src/nvidia/generated/g_vaspace_api_nvoc.c
+./src/nvidia/generated/g_vaspace_api_nvoc.h
+./src/nvidia/generated/g_gpu_vaspace_nvoc.c
+./src/nvidia/generated/g_gpu_vaspace_nvoc.h
+./src/nvidia/generated/g_io_vaspace_nvoc.c
+./src/nvidia/generated/g_io_vaspace_nvoc.h
+./src/nvidia/generated/g_fabric_vaspace_nvoc.c
+./src/nvidia/generated/g_fabric_vaspace_nvoc.h
+./src/nvidia/generated/g_virt_mem_allocator_nvoc.c
+./src/nvidia/generated/g_virt_mem_allocator_nvoc.h
+./src/nvidia/generated/g_virt_mem_mgr_nvoc.c
+./src/nvidia/generated/g_virt_mem_mgr_nvoc.h
+./src/nvidia/generated/g_virt_mem_range_nvoc.c
+./src/nvidia/generated/g_virt_mem_range_nvoc.h
+./src/nvidia/generated/g_virtual_mem_nvoc.c
+./src/nvidia/generated/g_virtual_mem_nvoc.h
+./src/nvidia/generated/g_mmu_fault_buffer_nvoc.c
+./src/nvidia/generated/g_mmu_fault_buffer_nvoc.h
+./src/nvidia/generated/g_kern_gmmu_nvoc.c
+./src/nvidia/generated/g_kern_gmmu_nvoc.h
+
+## Common/Shared Headers
+./src/common/sdk/nvidia/inc/mmu_fmt_types.h
