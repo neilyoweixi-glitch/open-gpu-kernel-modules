@@ -115,24 +115,141 @@ uvm_parent_gpu_service_non_replayable_fault_buffer()
 
 **Impact**: **HIGHEST**
 
-- **Replayable faults**: Single exclusive lock per GPU (`parent_gpu->isr.replayable_faults.service_lock`)
-  - Only ONE bottom-half can process replayable faults at a time per GPU
-  - Lock is held for the entire fault processing batch
-  - Batch size is configurable (default: 256 faults, max: 20 batches per service)
-  
-- **Non-replayable faults**: Single exclusive lock per GPU (`parent_gpu->isr.non_replayable_faults.service_lock`)
-  - Multiple bottom-halves can be scheduled but serialize on this lock
-  - Lock is held for processing all pending faults
-  
-**Why it's a bottleneck**:
-- Serializes ALL fault processing for a GPU
-- Cannot parallelize fault handling across multiple CPUs/threads for the same GPU
-- Long critical section: includes fault fetching, parsing, VA space lookups, block servicing, and GPU work submission
+#### Understanding the ISR Lock Behavior
 
-**Mitigation attempts**:
-- Batching reduces lock acquisition overhead
-- VA block-level locking allows some parallelism within a batch
-- But the ISR lock still serializes the entire batch processing
+**Important Clarification**: The ISR service lock does NOT mean you process only one fault at a time. Instead:
+
+1. **Lock Granularity**: The lock serializes the **fault handler execution** (bottom-half function), not individual faults
+2. **Batching**: Within a single handler execution, multiple **batches** of faults are processed:
+   - Each batch can contain up to **256 faults** (configurable via `uvm_perf_fault_batch_count`)
+   - Up to **20 batches** can be processed per handler execution (configurable via `uvm_perf_fault_max_batches_per_service`)
+   - This means up to **5,120 faults** can be processed in a single handler execution!
+
+3. **Handler Serialization**: Only **ONE bottom-half handler** can execute at a time per GPU, even though:
+   - Multiple interrupts can arrive
+   - Multiple bottom-halves can be scheduled to the workqueue
+   - But they all serialize on the ISR service lock
+
+#### Replayable Faults ISR Lock
+
+- **Lock**: `parent_gpu->isr.replayable_faults.service_lock` (semaphore)
+- **Acquisition**: Taken in ISR top-half using `down_trylock()`, then "transferred" to bottom-half
+- **Purpose**: 
+  - Prevents interrupt storms (disables interrupts while processing)
+  - Serializes fault buffer access (GET/PUT pointer updates)
+  - Ensures atomic fault processing batches
+  
+- **Processing Flow**:
+  ```
+  ISR Top-Half (interrupt context)
+    └─> down_trylock(service_lock)  [Acquires lock]
+    └─> Disable interrupts
+    └─> Schedule bottom-half
+    └─> [Lock ownership transferred to bottom-half]
+  
+  Bottom-Half (workqueue context)
+    └─> [Already holds service_lock]
+    └─> uvm_parent_gpu_service_replayable_faults()
+        └─> while (batches < max_batches):
+            └─> fetch_fault_buffer_entries()  [Reads up to 256 faults]
+            └─> preprocess_fault_batch()      [Coalesces duplicates]
+            └─> service_fault_batch()         [Processes all faults in batch]
+            └─> [Repeat for next batch]
+    └─> Unlock service_lock
+    └─> Re-enable interrupts
+  ```
+
+- **What Happens When Multiple Interrupts Arrive**:
+  - First interrupt: Top-half acquires lock, schedules bottom-half
+  - Subsequent interrupts: Top-half sees lock held, **cannot schedule another bottom-half**
+  - New faults accumulate in hardware buffer while first handler processes
+  - After first handler completes and unlocks, interrupts are re-enabled
+  - If faults still pending, next interrupt will schedule another bottom-half
+
+#### Non-Replayable Faults ISR Lock
+
+- **Lock**: `parent_gpu->isr.non_replayable_faults.service_lock` (semaphore)
+- **Acquisition**: Taken in bottom-half (not top-half, since RM manages the buffer)
+- **Purpose**: Serializes access to RM's shadow buffer
+- **Key Difference**: Multiple bottom-halves CAN be scheduled, but they serialize on the lock:
+  ```c
+  // From uvm_gpu_isr.c:145
+  scheduled = nv_kthread_q_schedule_q_item(&parent_gpu->isr.bottom_half_q,
+                                           &parent_gpu->isr.non_replayable_faults.bottom_half_q_item);
+  // If already queued, the existing instance will handle pending faults
+  ```
+  
+- **Processing Flow**:
+  ```
+  ISR Top-Half (interrupt context)
+    └─> [No lock acquisition - RM owns buffer]
+    └─> Schedule bottom-half (can schedule multiple times)
+  
+  Bottom-Half (workqueue context)
+    └─> uvm_parent_gpu_non_replayable_faults_isr_lock()  [Acquires lock]
+    └─> uvm_parent_gpu_service_non_replayable_fault_buffer()
+        └─> do {
+                └─> fetch_non_replayable_fault_buffer_entries()  [Reads from RM shadow buffer]
+                └─> For each fault:
+                    └─> service_fault()  [Processes individually]
+            } while (cached_faults > 0)
+    └─> Unlock service_lock
+  ```
+
+#### Why It's a Bottleneck
+
+1. **Complete Serialization Per GPU**:
+   - All fault processing for a GPU happens sequentially
+   - Cannot leverage multiple CPUs to process faults in parallel for the same GPU
+   - Even though batching processes many faults, it's still one-at-a-time handler execution
+
+2. **Long Critical Section**:
+   - Lock held during entire handler execution
+   - Includes: fault fetching, parsing, VA space lookups, VA block servicing, GPU work submission, TLB invalidations
+   - Can hold lock for milliseconds while processing thousands of faults
+
+3. **Interrupt Disabling**:
+   - For replayable faults, interrupts are disabled while lock is held
+   - New faults accumulate but cannot trigger new handler until lock released
+   - Can cause latency spikes if handler takes too long
+
+4. **Workqueue Serialization**:
+   - Even though workqueue can run on multiple CPUs
+   - ISR lock ensures only one handler executes at a time per GPU
+   - Other CPUs wait for lock, reducing parallelism
+
+#### Mitigation Attempts
+
+1. **Batching**:
+   - Processes up to 256 faults per batch (reduces lock acquisition overhead)
+   - Processes up to 20 batches per handler execution
+   - But still serialized by ISR lock
+
+2. **VA Block-Level Locking**:
+   - Allows parallel processing of different VA blocks within a batch
+   - But ISR lock still serializes batch processing
+
+3. **Coalescing**:
+   - Merges duplicate faults on same page
+   - Reduces number of faults to process
+   - But doesn't reduce lock hold time significantly
+
+#### Performance Impact
+
+**Under Light Load**:
+- Lock contention is minimal
+- Handler completes quickly
+- Next interrupt can schedule immediately after unlock
+
+**Under Heavy Load**:
+- Handler processes many batches (up to 20)
+- Lock held for extended periods (milliseconds)
+- New interrupts arrive but cannot schedule handlers
+- Faults accumulate in hardware buffer
+- Can cause:
+  - Increased fault latency
+  - Buffer overflow (if buffer fills up)
+  - GPU stalls waiting for faults to be serviced
 
 ### 2. **VA Space Lock Contention (MODERATE BOTTLENECK)**
 
@@ -184,6 +301,141 @@ uvm_parent_gpu_service_non_replayable_fault_buffer()
 - Different faults on different blocks can proceed in parallel
 - Lock is held only during block-specific operations
 
+## Detailed Answer: Can You Process Only One Fault at a Time?
+
+### Short Answer
+**No, you don't process one fault at a time. You process batches of faults (up to 256 per batch, up to 20 batches = 5,120 faults per handler execution), but only ONE handler execution can run at a time per GPU due to the ISR lock.**
+
+### Detailed Explanation
+
+#### What the ISR Lock Actually Serializes
+
+The ISR service lock serializes the **fault handler function execution**, not individual fault processing. Here's what actually happens:
+
+**Scenario: 10,000 faults arrive on GPU 0**
+
+1. **First Interrupt Arrives**:
+   - ISR top-half acquires `service_lock` (via `down_trylock()`)
+   - Disables replayable fault interrupts
+   - Schedules bottom-half to workqueue
+   - **Lock ownership transferred to bottom-half**
+
+2. **Bottom-Half Executes** (holds `service_lock`):
+   - Processes **Batch 1**: Fetches up to 256 faults, processes them
+   - Processes **Batch 2**: Fetches next 256 faults, processes them
+   - ... continues up to 20 batches ...
+   - Processes **Batch 20**: Fetches final batch, processes them
+   - **Total: Up to 5,120 faults processed in this handler execution**
+   - Releases `service_lock`
+   - Re-enables interrupts
+
+3. **More Faults Still Pending**:
+   - Hardware buffer still has ~4,880 faults
+   - Interrupt fires again
+   - New bottom-half scheduled
+   - **Waits for lock** (if previous handler still running)
+   - Once lock acquired, processes next batches
+
+#### Concrete Example: Processing 10,000 Faults
+
+```
+Time    | CPU 0                    | CPU 1                    | GPU Buffer
+--------|--------------------------|--------------------------|------------
+T0      | Handler 1 starts         | [Waiting for lock]      | 10,000 faults
+        | Lock: HELD               |                          |
+T1      | Processing batch 1       | [Waiting for lock]      | 10,000 faults
+        | (256 faults)             |                          |
+T2      | Processing batch 2       | [Waiting for lock]      | 10,000 faults
+        | (256 faults)             |                          |
+...     | ...                      | ...                      | ...
+T20     | Processing batch 20      | [Waiting for lock]      | 4,880 faults
+        | (256 faults)             |                          |
+T21     | Handler 1 completes     | Handler 2 starts         | 4,880 faults
+        | Lock: RELEASED           | Lock: ACQUIRED           |
+T22     | [Idle]                   | Processing batch 1       | 4,880 faults
+        |                          | (256 faults)             |
+...     | ...                      | ...                      | ...
+```
+
+**Key Observations**:
+- Only ONE handler executes at a time (serialized by ISR lock)
+- Each handler processes MANY faults (up to 5,120)
+- CPU 1 waits for CPU 0 to finish, even though CPU 1 could process different faults
+- This is the bottleneck: cannot parallelize across CPUs for same GPU
+
+#### What Happens with Multiple Interrupts
+
+**Replayable Faults**:
+```c
+// From uvm_gpu_isr.c:100
+if (down_trylock(&parent_gpu->isr.replayable_faults.service_lock.sem) != 0)
+    return 0;  // Lock already held, cannot schedule another handler
+```
+
+- **Interrupt 1**: Acquires lock, schedules handler
+- **Interrupt 2**: Sees lock held, **cannot schedule**, returns immediately
+- **Interrupt 3**: Sees lock held, **cannot schedule**, returns immediately
+- New faults accumulate in hardware buffer
+- After handler completes and unlocks, next interrupt can schedule
+
+**Non-Replayable Faults**:
+```c
+// From uvm_gpu_isr.c:145
+scheduled = nv_kthread_q_schedule_q_item(...);
+// Can schedule multiple times, but handlers serialize on lock
+```
+
+- **Interrupt 1**: Schedules handler 1
+- **Interrupt 2**: Can schedule handler 2 (different from replayable!)
+- **Handler 1**: Acquires lock, processes faults
+- **Handler 2**: Waits for lock, then processes faults
+- Multiple handlers can be queued, but execute sequentially
+
+#### Parallelism Within a Batch
+
+Even though handlers serialize, there IS parallelism within a batch:
+
+1. **VA Block Level**: Different VA blocks can be processed in parallel
+   - Handler acquires VA space lock (read mode)
+   - Processes faults grouped by VA block
+   - Each VA block lock allows parallel access to different blocks
+   - But still serialized at handler level
+
+2. **GPU Work Submission**: Can submit multiple GPU operations
+   - Tracks work in trackers
+   - Can overlap GPU operations
+   - But handler still holds ISR lock during this
+
+#### The Real Bottleneck
+
+The bottleneck is NOT that you process one fault at a time. The bottleneck is:
+
+1. **Handler Serialization**: Only one handler can execute per GPU
+2. **Cannot Parallelize Across CPUs**: Even though faults are independent, they must be processed by one handler
+3. **Long Lock Hold Time**: Handler holds lock for entire execution (milliseconds)
+4. **Interrupt Disabling**: New interrupts cannot schedule handlers while lock held
+
+#### Comparison: What If There Was No ISR Lock?
+
+**Hypothetical Parallel Processing**:
+```
+CPU 0: Processing faults 0-255     (batch 1)
+CPU 1: Processing faults 256-511 (batch 2)
+CPU 2: Processing faults 512-767 (batch 3)
+CPU 3: Processing faults 768-1023 (batch 4)
+...
+```
+
+**Current Serial Processing**:
+```
+CPU 0: Processing faults 0-5119   (batches 1-20)
+CPU 1: [Waiting]
+CPU 2: [Waiting]
+CPU 3: [Waiting]
+```
+
+The ISR lock prevents the parallel scenario, forcing serial execution.
+
 ## Concurrency Characteristics
 
 ### Parallelism Opportunities
@@ -194,8 +446,8 @@ uvm_parent_gpu_service_non_replayable_fault_buffer()
 
 ### Serialization Points
 
-1. **Same GPU, Replayable Faults**: Serialized by ISR service lock
-2. **Same GPU, Non-Replayable Faults**: Serialized by ISR service lock
+1. **Same GPU, Replayable Faults**: Serialized by ISR service lock (one handler at a time)
+2. **Same GPU, Non-Replayable Faults**: Serialized by ISR service lock (handlers queue and execute sequentially)
 3. **Same VA Space**: Multiple readers allowed, but writers block all
 4. **Same VA Block**: Fully serialized by VA block lock
 
@@ -244,6 +496,52 @@ uvm_parent_gpu_service_non_replayable_fault_buffer()
    - Allow multiple threads to process faults from the same GPU
    - Use per-uTLB or per-channel locking instead of global ISR lock
 
+## Summary: ISR Lock Impact on Concurrency
+
+### Key Takeaways
+
+1. **You DON'T process one fault at a time**
+   - Each handler execution processes **batches** of faults
+   - Up to **256 faults per batch**
+   - Up to **20 batches per handler execution**
+   - **Total: Up to 5,120 faults per handler execution**
+
+2. **You DO serialize handler executions**
+   - Only **ONE handler can execute at a time per GPU**
+   - Even if multiple CPUs are available
+   - Even if faults are independent
+   - This is enforced by the ISR service lock
+
+3. **The bottleneck is handler-level serialization, not fault-level**
+   - Batching helps amortize lock overhead
+   - But cannot parallelize across CPUs for same GPU
+   - This limits scalability under heavy fault load
+
+4. **Impact increases with fault rate**
+   - Light load: Lock contention minimal, handlers complete quickly
+   - Heavy load: Lock held longer, new handlers queue up, faults accumulate
+   - Can cause GPU stalls if buffer fills up
+
+### Performance Characteristics
+
+| Metric | Value | Impact |
+|--------|-------|--------|
+| Faults per batch | Up to 256 | Reduces lock acquisitions |
+| Batches per handler | Up to 20 | Amortizes lock overhead |
+| Max faults per handler | Up to 5,120 | Good throughput per handler |
+| Handlers per GPU | **1 at a time** | **Limits parallelism** |
+| CPUs that can help | **0** (for same GPU) | **Cannot scale horizontally** |
+
+### The Fundamental Limitation
+
+The ISR lock creates a **serialization bottleneck** at the handler level:
+- Prevents parallel processing across CPUs for the same GPU
+- Forces sequential handler execution
+- Limits scalability to single-threaded handler performance
+- Cannot be overcome by adding more CPUs (for the same GPU)
+
+This is why the ISR lock is identified as the **CRITICAL bottleneck** - it fundamentally limits the concurrency of fault processing, even though individual fault processing is highly optimized through batching.
+
 ## Code References
 
 - ISR lock definitions: `kernel-open/nvidia-uvm/uvm_gpu_isr.h`, `uvm_gpu_isr.c`
@@ -252,3 +550,12 @@ uvm_parent_gpu_service_non_replayable_fault_buffer()
 - Lock ordering: `kernel-open/nvidia-uvm/uvm_lock.h`
 - VA space locking: `kernel-open/nvidia-uvm/uvm_va_space.c`
 - VA block locking: `kernel-open/nvidia-uvm/uvm_va_block.c`
+
+### Key Code Locations
+
+- ISR lock acquisition (replayable): `uvm_gpu_isr.c:742-758`
+- ISR lock release (replayable): `uvm_gpu_isr.c:760-825`
+- Bottom-half execution: `uvm_gpu_isr.c:598-631`
+- Batch processing loop: `uvm_gpu_replayable_faults.c:2920-3013`
+- Fault fetching: `uvm_gpu_replayable_faults.c:850-983`
+- Batch size configuration: `uvm_gpu_replayable_faults.c:72-78`
