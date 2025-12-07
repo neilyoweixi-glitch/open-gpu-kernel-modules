@@ -542,6 +542,149 @@ The ISR lock creates a **serialization bottleneck** at the handler level:
 
 This is why the ISR lock is identified as the **CRITICAL bottleneck** - it fundamentally limits the concurrency of fault processing, even though individual fault processing is highly optimized through batching.
 
+## Fault Granularity
+
+### Overview
+
+Fault granularity refers to the smallest unit of memory that can trigger and be tracked as a separate fault. The UVM driver uses a multi-level granularity system:
+
+### Hardware Fault Granularity: 4KB
+
+**GPU Hardware Behavior**:
+- GPUs report faults at **4KB (4096 bytes) granularity**
+- Fault addresses from hardware are aligned to 4KB boundaries
+- This is the smallest unit that can trigger a page fault
+
+**Code Evidence**:
+```c
+// From uvm_gpu_replayable_faults.c:917-919
+// The GPU aligns the fault addresses to 4k, but all of our tracking is
+// done in PAGE_SIZE chunks which might be larger.
+current_entry->fault_address = UVM_PAGE_ALIGN_DOWN(current_entry->fault_address);
+```
+
+### Software Tracking Granularity: PAGE_SIZE
+
+**UVM Driver Behavior**:
+- UVM tracks faults at **PAGE_SIZE granularity** (kernel's native page size)
+- On most Linux systems: **PAGE_SIZE = 4KB**
+- On ARM64 systems with 64KB pages: **PAGE_SIZE = 64KB**
+- Fault addresses are aligned down to PAGE_SIZE boundaries
+
+**Code Evidence**:
+```c
+// From uvm_gpu_replayable_faults.c:919
+current_entry->fault_address = UVM_PAGE_ALIGN_DOWN(current_entry->fault_address);
+
+// From uvm_gpu_non_replayable_faults.c:211
+fault_entry->fault_address = UVM_PAGE_ALIGN_DOWN(fault_entry->fault_address);
+```
+
+**Implications**:
+- On 4KB page systems: Hardware and software granularity match (4KB)
+- On 64KB page systems: Multiple 4KB hardware faults can map to one PAGE_SIZE tracking unit
+- This means UVM may service multiple 4KB faults together when they fall within the same PAGE_SIZE chunk
+
+### VA Block Granularity: 2MB
+
+**VA Block Structure**:
+- VA blocks are **2MB (2^21 bytes)** chunks of virtual address space
+- Defined by `UVM_VA_BLOCK_SIZE = (1ULL << UVM_VA_BLOCK_BITS)` where `UVM_VA_BLOCK_BITS = 21`
+- Each VA block contains `PAGES_PER_UVM_VA_BLOCK = UVM_VA_BLOCK_SIZE / PAGE_SIZE` pages
+- On 4KB page systems: **512 pages per VA block**
+- On 64KB page systems: **32 pages per VA block**
+
+**Code Evidence**:
+```c
+// From uvm_va_block_types.h:42-50
+#define UVM_VA_BLOCK_BITS               21
+#define UVM_VA_BLOCK_SIZE               (1ULL << UVM_VA_BLOCK_BITS)  // 2MB
+#define PAGES_PER_UVM_VA_BLOCK          (UVM_VA_BLOCK_SIZE / PAGE_SIZE)
+```
+
+**Fault Tracking Within VA Blocks**:
+- Faults are tracked using page masks (`uvm_page_mask_t`)
+- Each bit in the mask represents one PAGE_SIZE page within the block
+- Page index calculated as: `page_index = (fault_address - block_start) / PAGE_SIZE`
+
+**Code Evidence**:
+```c
+// From uvm_va_block.h:1614
+static uvm_page_index_t uvm_va_block_cpu_page_index(uvm_va_block_t *va_block, NvU64 addr)
+{
+    return (uvm_page_index_t)((addr - va_block->start) / PAGE_SIZE);
+}
+```
+
+### Granularity Hierarchy Summary
+
+```
+Hardware Level:     4KB (fixed, GPU hardware)
+    ↓
+Software Level:     PAGE_SIZE (4KB on x86_64, 64KB on ARM64)
+    ↓
+VA Block Level:     2MB (UVM_VA_BLOCK_SIZE)
+    ↓
+VA Space Level:     Entire virtual address space
+```
+
+### Example: Fault Processing at Different Granularities
+
+**Scenario**: GPU faults on address `0x10001234` (4KB-aligned)
+
+1. **Hardware Reports**: Fault at `0x10001234` (4KB granularity)
+
+2. **UVM Aligns**: 
+   - On 4KB page system: `UVM_PAGE_ALIGN_DOWN(0x10001234) = 0x10001000`
+   - On 64KB page system: `UVM_PAGE_ALIGN_DOWN(0x10001234) = 0x10000000`
+   - Fault tracked at PAGE_SIZE boundary
+
+3. **VA Block Lookup**:
+   - Block start: `UVM_VA_BLOCK_ALIGN_DOWN(0x10001000) = 0x1000000` (2MB aligned)
+   - Block contains addresses: `[0x1000000, 0x101FFFFF]` (2MB range)
+   - Page index within block: `(0x10001000 - 0x1000000) / PAGE_SIZE`
+
+4. **Fault Processing**:
+   - VA block lock acquired for the 2MB block
+   - Page mask bit set for the specific PAGE_SIZE page
+   - All faults within the same PAGE_SIZE page are coalesced
+   - Service operation applies to the PAGE_SIZE page
+
+### Coalescing and Batching
+
+**Fault Coalescing**:
+- Multiple faults on the same PAGE_SIZE page are coalesced into one entry
+- Reduces processing overhead
+- Code: `uvm_gpu_replayable_faults.c:944-970` (coalescing logic)
+
+**Batch Processing**:
+- Faults are processed in batches (up to 256 faults per batch)
+- Batches can contain faults from multiple VA blocks
+- Within a batch, faults are grouped by VA block for efficient processing
+
+### Performance Implications
+
+1. **4KB vs 64KB PAGE_SIZE**:
+   - 64KB pages: Fewer page table entries, but less granular fault tracking
+   - 4KB pages: More granular tracking, matches hardware exactly
+
+2. **VA Block Size (2MB)**:
+   - Balances lock granularity vs. memory overhead
+   - Larger blocks = fewer locks but more contention
+   - Smaller blocks = more locks but better parallelism
+
+3. **Fault Coalescing**:
+   - Reduces duplicate processing
+   - Important for workloads with many faults on same pages
+   - Can mask some fault patterns
+
+### Code References for Granularity
+
+- VA block size: `uvm_va_block_types.h:42-45`
+- Fault address alignment: `uvm_gpu_replayable_faults.c:917-919`
+- Page index calculation: `uvm_va_block.h:1614`
+- Coalescing logic: `uvm_gpu_replayable_faults.c:944-970`
+
 ## Code References
 
 - ISR lock definitions: `kernel-open/nvidia-uvm/uvm_gpu_isr.h`, `uvm_gpu_isr.c`
