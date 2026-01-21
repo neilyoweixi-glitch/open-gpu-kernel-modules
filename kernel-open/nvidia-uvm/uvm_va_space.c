@@ -1504,6 +1504,15 @@ static void destroy_gpu_va_space(uvm_gpu_va_space_t *gpu_va_space)
     uvm_gpu_va_space_release(gpu_va_space);
 }
 
+static noinline void create_gpu_va_space_success_point(uvm_va_space_t *va_space, uvm_gpu_t *gpu, struct device *gpu_dev)
+{
+    UVM_INFO_PRINT("create_gpu_va_space va_space: va_space: 0x%llx gpu: 0x%llx device: 0x%llx\n",
+                                               (unsigned long long)va_space,
+                                                (unsigned long long)gpu,
+                                                (unsigned long long)gpu_dev);
+    return;
+}
+
 static NV_STATUS create_gpu_va_space(uvm_gpu_t *gpu,
                                      uvm_va_space_t *va_space,
                                      uvm_rm_user_object_t *user_rm_va_space,
@@ -1585,6 +1594,8 @@ static NV_STATUS create_gpu_va_space(uvm_gpu_t *gpu,
         goto error;
 
     *out_gpu_va_space = gpu_va_space;
+
+    create_gpu_va_space_success_point(va_space, gpu, &gpu->parent->pci_dev->dev);
     return NV_OK;
 
 error:

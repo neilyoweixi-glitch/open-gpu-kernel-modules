@@ -38,6 +38,7 @@
 #include "uvm_perf_thrashing.h"
 #include "uvm_gpu_non_replayable_faults.h"
 #include "uvm_ats_faults.h"
+#include "uvm_gmem.h"
 #include "uvm_test.h"
 
 // The documentation at the beginning of uvm_gpu_non_replayable_faults.c
@@ -1974,8 +1975,11 @@ static NV_STATUS service_fault_batch_dispatch(uvm_va_space_t *va_space,
 
     if (va_range)
         status = uvm_va_block_find_create_in_range(va_space, va_range, fault_address, &va_block);
-    else if (mm)
-        status = uvm_hmm_va_block_find_create(va_space, fault_address, &va_block_context->hmm.vma, &va_block);
+    else if (mm && gpu_uvm_service_fault) {
+	(*block_faults) = 1;
+	return gpu_uvm_service_fault(mm, fault_address, &gpu->parent->pci_dev->dev);
+    }
+        //status = uvm_hmm_va_block_find_create(va_space, fault_address, &va_block_context->hmm.vma, &va_block);
     else
         status = NV_ERR_INVALID_ADDRESS;
 

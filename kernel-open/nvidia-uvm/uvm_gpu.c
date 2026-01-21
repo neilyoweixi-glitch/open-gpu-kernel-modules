@@ -2678,6 +2678,18 @@ cleanup:
     return status;
 }
 
+static noinline void uvm_register_gpu(struct device *dev)
+{
+    UVM_INFO_PRINT("uvm_register_gpu device: 0x%llx\n", (unsigned long long)dev);
+    return;
+}
+
+static noinline void uvm_unregister_gpu(struct device *dev)
+{
+    UVM_INFO_PRINT("uvm_unregister_gpu device: 0x%llx\n", (unsigned long long)dev);
+    return;
+}
+
 // Remove a gpu and unregister it from RM
 // Note that this is also used in most error paths in add_gpu()
 static void remove_gpu(uvm_gpu_t *gpu)
@@ -2726,8 +2738,10 @@ static void remove_gpu(uvm_gpu_t *gpu)
     __clear_bit(sub_processor_index, parent_gpu->valid_gpus);
 
     // Remove the GPU from the table.
-    if (free_parent)
+    if (free_parent) {
+        uvm_unregister_gpu(&parent_gpu->pci_dev->dev);
         uvm_global_remove_parent_gpu(parent_gpu);
+    }
 
     uvm_spin_unlock_irqrestore(&g_uvm_global.gpu_table_lock);
 
@@ -2750,6 +2764,8 @@ static void remove_gpu(uvm_gpu_t *gpu)
     if (free_parent)
         deinit_parent_gpu(parent_gpu);
 }
+
+
 
 // Add a new gpu and register it with RM
 static NV_STATUS add_gpu(const NvProcessorUuid *gpu_uuid,
@@ -2815,8 +2831,10 @@ static NV_STATUS add_gpu(const NvProcessorUuid *gpu_uuid,
 
     uvm_spin_lock_irqsave(&g_uvm_global.gpu_table_lock);
 
-    if (alloc_parent)
+    if (alloc_parent) {
+        uvm_register_gpu(&parent_gpu->pci_dev->dev);
         uvm_global_add_parent_gpu(parent_gpu);
+    }
 
     // Mark the GPU as valid in the parent GPU's GPU table.
     UVM_ASSERT(!test_bit(uvm_id_sub_processor_index(gpu->id), parent_gpu->valid_gpus));

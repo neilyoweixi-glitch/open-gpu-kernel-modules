@@ -92,6 +92,7 @@ NVIDIA_UVM_SOURCES += nvidia-uvm/uvm_migrate_pageable.c
 NVIDIA_UVM_SOURCES += nvidia-uvm/uvm_map_external.c
 NVIDIA_UVM_SOURCES += nvidia-uvm/uvm_user_channel.c
 NVIDIA_UVM_SOURCES += nvidia-uvm/uvm_hmm.c
+NVIDIA_UVM_SOURCES += nvidia-uvm/uvm_gmem.c
 NVIDIA_UVM_SOURCES += nvidia-uvm/uvm_perf_heuristics.c
 NVIDIA_UVM_SOURCES += nvidia-uvm/uvm_perf_thrashing.c
 NVIDIA_UVM_SOURCES += nvidia-uvm/uvm_perf_prefetch.c
